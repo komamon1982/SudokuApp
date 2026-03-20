@@ -1,5 +1,6 @@
 package com.komamon.sudoku
 
+import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,11 +24,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,16 +43,66 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+// ---- Navigation ----
+sealed class Screen {
+    object DifficultySelect : Screen()
+    data class ProblemList(val difficulty: String) : Screen()
+    data class Game(val problem: SudokuProblem, val index: Int, val total: Int) : Screen()
+}
+
+// ---- SharedPreferences helpers ----
+private const val PREFS_NAME = "sudoku_prefs"
+private const val KEY_CLEARED = "cleared_ids"
+private const val KEY_BOARD_PREFIX = "board_"
+
+private fun getPrefs(context: Context) =
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+private fun getClearedIds(context: Context): Set<String> =
+    getPrefs(context).getStringSet(KEY_CLEARED, emptySet()) ?: emptySet()
+
+private fun markCleared(context: Context, id: String) {
+    val updated = getClearedIds(context).toMutableSet().also { it.add(id) }
+    getPrefs(context).edit().putStringSet(KEY_CLEARED, updated).apply()
+}
+
+private fun resetClearedForDifficulty(context: Context, problems: List<SudokuProblem>) {
+    val updated = getClearedIds(context).toMutableSet().also { set ->
+        problems.forEach { set.remove(it.id) }
+    }
+    getPrefs(context).edit().putStringSet(KEY_CLEARED, updated).apply()
+}
+
+private fun saveBoardState(context: Context, id: String, board: List<List<Int?>>) {
+    val str = board.flatten().joinToString("") { (it ?: 0).toString() }
+    getPrefs(context).edit().putString(KEY_BOARD_PREFIX + id, str).apply()
+}
+
+private fun loadBoardState(context: Context, id: String, puzzle: List<List<Int?>>): List<List<Int?>> {
+    val str = getPrefs(context).getString(KEY_BOARD_PREFIX + id, null)
+        ?: return puzzle
+    if (str.length != 81) return puzzle
+    return List(9) { r ->
+        List(9) { c ->
+            val digit = str[r * 9 + c].digitToIntOrNull() ?: 0
+            if (digit == 0) null else digit
+        }
+    }
+}
+
+// ---- Activity ----
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,7 +110,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    SudokuScreen()
+                    SudokuApp()
                 }
             }
         }
@@ -61,56 +118,117 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun SudokuScreen() {
-    val initialBoard = listOf(
-        listOf(5, 3, null, null, 7, null, null, null, null),
-        listOf(6, null, null, 1, 9, 5, null, null, null),
-        listOf(null, 9, 8, null, null, null, null, 6, null),
-        listOf(8, null, null, null, 6, null, null, null, 3),
-        listOf(4, null, null, 8, null, 3, null, null, 1),
-        listOf(7, null, null, null, 2, null, null, null, 6),
-        listOf(null, 6, null, null, null, null, 2, 8, null),
-        listOf(null, null, null, 4, 1, 9, null, null, 5),
-        listOf(null, null, null, null, 8, null, null, 7, 9)
-    )
+fun SudokuApp() {
+    val context = LocalContext.current
+    var screen by remember { mutableStateOf<Screen>(Screen.DifficultySelect) }
+    var clearedIds by remember { mutableStateOf(getClearedIds(context)) }
 
-    val solution = listOf(
-        listOf(5, 3, 4, 6, 7, 8, 9, 1, 2),
-        listOf(6, 7, 2, 1, 9, 5, 3, 4, 8),
-        listOf(1, 9, 8, 3, 4, 2, 5, 6, 7),
-        listOf(8, 5, 9, 7, 6, 1, 4, 2, 3),
-        listOf(4, 2, 6, 8, 5, 3, 7, 9, 1),
-        listOf(7, 1, 3, 9, 2, 4, 8, 5, 6),
-        listOf(9, 6, 1, 5, 3, 7, 2, 8, 4),
-        listOf(2, 8, 7, 4, 1, 9, 6, 3, 5),
-        listOf(3, 4, 5, 2, 8, 6, 1, 7, 9)
-    )
+    fun refreshCleared() { clearedIds = getClearedIds(context) }
 
-    val hintCells = remember {
-        Array(9) { row -> BooleanArray(9) { col -> initialBoard[row][col] != null } }
+    when (val s = screen) {
+        is Screen.DifficultySelect -> DifficultySelectScreen(
+            onDifficultySelected = { difficulty -> screen = Screen.ProblemList(difficulty) }
+        )
+        is Screen.ProblemList -> {
+            val problems = problemsFor(s.difficulty)
+            ProblemListScreen(
+                difficulty = s.difficulty,
+                problems = problems,
+                clearedIds = clearedIds,
+                onProblemSelected = { problem, index ->
+                    screen = Screen.Game(problem, index, problems.size)
+                },
+                onResetCleared = {
+                    resetClearedForDifficulty(context, problems)
+                    refreshCleared()
+                },
+                onBack = { screen = Screen.DifficultySelect }
+            )
+        }
+        is Screen.Game -> GameScreen(
+            problem = s.problem,
+            index = s.index,
+            total = s.total,
+            onBack = {
+                refreshCleared()
+                screen = Screen.ProblemList(s.problem.difficulty)
+            },
+            onCleared = { id ->
+                markCleared(context, id)
+                refreshCleared()
+                screen = Screen.ProblemList(s.problem.difficulty)
+            }
+        )
     }
+}
 
-    val board = remember {
-        mutableStateListOf(*Array(9) { row ->
-            mutableStateListOf(*Array(9) { col -> initialBoard[row][col] })
-        })
+private fun problemsFor(difficulty: String): List<SudokuProblem> = when (difficulty) {
+    "入門" -> SudokuProblems.introProblems
+    "初級" -> SudokuProblems.beginnerProblems
+    "中級" -> SudokuProblems.intermediateProblems
+    else -> SudokuProblems.advancedProblems
+}
+
+// ---- Difficulty Select Screen ----
+@Composable
+fun DifficultySelectScreen(onDifficultySelected: (String) -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.systemBars)
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "数独",
+            fontSize = 40.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(bottom = 56.dp)
+        )
+        listOf("入門", "初級", "中級", "上級").forEach { difficulty ->
+            Button(
+                onClick = { onDifficultySelected(difficulty) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+                    .height(56.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF1976D2),
+                    contentColor = Color.White
+                )
+            ) {
+                Text(difficulty, fontSize = 20.sp)
+            }
+        }
     }
+}
 
-    // memos: Map<(row,col), Set<number>> — メモ数字の管理
-    var memos by remember { mutableStateOf(mapOf<Pair<Int, Int>, Set<Int>>()) }
-    var selectedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
-    var errorCells by remember { mutableStateOf(emptySet<Pair<Int, Int>>()) }
-    var showClearDialog by remember { mutableStateOf(false) }
+// ---- Problem List Screen ----
+@Composable
+fun ProblemListScreen(
+    difficulty: String,
+    problems: List<SudokuProblem>,
+    clearedIds: Set<String>,
+    onProblemSelected: (SudokuProblem, Int) -> Unit,
+    onResetCleared: () -> Unit,
+    onBack: () -> Unit
+) {
+    var showResetDialog by remember { mutableStateOf(false) }
 
-    if (showClearDialog) {
+    if (showResetDialog) {
         AlertDialog(
-            onDismissRequest = { showClearDialog = false },
-            title = { Text("クリア！") },
-            text = { Text("おめでとうございます！") },
+            onDismissRequest = { showResetDialog = false },
+            text = { Text("この難易度のクリア状態をリセットしますか？") },
             confirmButton = {
-                TextButton(onClick = { showClearDialog = false }) {
-                    Text("OK")
-                }
+                TextButton(onClick = {
+                    onResetCleared()
+                    showResetDialog = false
+                }) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDialog = false }) { Text("キャンセル") }
             }
         )
     }
@@ -119,16 +237,198 @@ fun SudokuScreen() {
         modifier = Modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.systemBars)
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+            .padding(16.dp)
     ) {
-        Text(
-            text = "Sudoku",
-            fontSize = 28.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 16.dp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onBack) {
+                Text("← 戻る", fontSize = 16.sp)
+            }
+            Text(
+                text = difficulty,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 8.dp)
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            Text(
+                text = "${clearedIds.count { id -> problems.any { it.id == id } }}/${problems.size} クリア",
+                fontSize = 14.sp,
+                color = Color(0xFF388E3C)
+            )
+        }
+        TextButton(
+            onClick = { showResetDialog = true },
+            modifier = Modifier.align(Alignment.End)
+        ) {
+            Text("クリア状態をリセット", fontSize = 13.sp, color = Color(0xFFD32F2F))
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(4),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            itemsIndexed(problems) { index, problem ->
+                val isCleared = problem.id in clearedIds
+                Box(
+                    modifier = Modifier
+                        .aspectRatio(1f)
+                        .background(
+                            color = if (isCleared) Color(0xFF388E3C) else Color(0xFF1976D2),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        .clickable { onProblemSelected(problem, index) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isCleared) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("✓", fontSize = 18.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                            Text("${index + 1}", fontSize = 11.sp, color = Color.White)
+                        }
+                    } else {
+                        Text(
+                            text = "${index + 1}",
+                            fontSize = 18.sp,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- Game Screen ----
+private enum class CheckResult { HAS_EMPTY, HAS_ERROR, CLEAR }
+
+@Composable
+fun GameScreen(
+    problem: SudokuProblem,
+    index: Int,
+    total: Int,
+    onBack: () -> Unit,
+    onCleared: (String) -> Unit
+) {
+    val context = LocalContext.current
+
+    val hintCells = remember {
+        Array(9) { r -> BooleanArray(9) { c -> problem.puzzle[r][c] != null } }
+    }
+
+    val board = remember {
+        val saved = loadBoardState(context, problem.id, problem.puzzle)
+        mutableStateListOf(*Array(9) { r ->
+            mutableStateListOf(*Array(9) { c -> saved[r][c] })
+        })
+    }
+
+    var memos by remember { mutableStateOf(mapOf<Pair<Int, Int>, Set<Int>>()) }
+    var selectedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var errorCells by remember { mutableStateOf(emptySet<Pair<Int, Int>>()) }
+    var showClearDialog by remember { mutableStateOf(false) }
+    var showEraseAllDialog by remember { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    fun saveBoard() {
+        saveBoardState(context, problem.id, List(9) { r -> List(9) { c -> board[r][c] } })
+    }
+
+    fun check(): CheckResult {
+        val errors = mutableSetOf<Pair<Int, Int>>()
+        var hasEmpty = false
+        for (r in 0..8) {
+            for (c in 0..8) {
+                if (!hintCells[r][c]) {
+                    val v = board[r][c]
+                    when {
+                        v == null -> hasEmpty = true
+                        v != problem.answer[r][c] -> errors.add(Pair(r, c))
+                    }
+                }
+            }
+        }
+        return when {
+            hasEmpty -> CheckResult.HAS_EMPTY
+            errors.isNotEmpty() -> { errorCells = errors; CheckResult.HAS_ERROR }
+            else -> { errorCells = emptySet(); CheckResult.CLEAR }
+        }
+    }
+
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("クリア！") },
+            text = { Text("おめでとうございます！") },
+            confirmButton = {
+                TextButton(onClick = { onCleared(problem.id) }) { Text("OK") }
+            }
         )
+    }
+
+    if (showEraseAllDialog) {
+        AlertDialog(
+            onDismissRequest = { showEraseAllDialog = false },
+            text = { Text("入力した数字を全て消去しますか？") },
+            confirmButton = {
+                TextButton(onClick = {
+                    for (r in 0..8) for (c in 0..8) if (!hintCells[r][c]) board[r][c] = null
+                    memos = emptyMap()
+                    errorCells = emptySet()
+                    saveBoard()
+                    showEraseAllDialog = false
+                }) { Text("OK") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEraseAllDialog = false }) { Text("キャンセル") }
+            }
+        )
+    }
+
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.systemBars)
+    ) { innerPadding ->
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(innerPadding)
+            .padding(horizontal = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Header
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = {
+                saveBoard()
+                onBack()
+            }) {
+                Text("← 戻る", fontSize = 16.sp)
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Text(
+                text = "${problem.difficulty}　${index + 1}/${total}",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = { showEraseAllDialog = true }) {
+                Text("全消去", fontSize = 16.sp, color = Color(0xFFD32F2F))
+            }
+        }
 
         SudokuBoard(
             board = board,
@@ -136,37 +436,39 @@ fun SudokuScreen() {
             selectedCell = selectedCell,
             errorCells = errorCells,
             memos = memos,
-            onCellClick = { row, col ->
-                selectedCell = if (selectedCell == Pair(row, col)) null else Pair(row, col)
+            onCellClick = { r, c ->
+                selectedCell = if (selectedCell == Pair(r, c)) null else Pair(r, c)
             }
         )
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         NumberPad(
             onNumberClick = { number ->
-                selectedCell?.let { (row, col) ->
-                    if (!hintCells[row][col]) {
-                        board[row][col] = number
-                        memos = memos - Pair(row, col)           // メモをすべて消す
-                        errorCells = errorCells - Pair(row, col) // エラー表示を消す
+                selectedCell?.let { (r, c) ->
+                    if (!hintCells[r][c]) {
+                        board[r][c] = number
+                        memos = memos - Pair(r, c)
+                        errorCells = errorCells - Pair(r, c)
+                        saveBoard()
                     }
                 }
             },
             onMemoClick = { number ->
-                selectedCell?.let { (row, col) ->
-                    if (!hintCells[row][col] && board[row][col] == null) {
-                        val key = Pair(row, col)
-                        val current = memos.getOrDefault(key, emptySet())
-                        memos = memos + (key to if (number in current) current - number else current + number)
+                selectedCell?.let { (r, c) ->
+                    if (!hintCells[r][c] && board[r][c] == null) {
+                        val key = Pair(r, c)
+                        val cur = memos.getOrDefault(key, emptySet())
+                        memos = memos + (key to if (number in cur) cur - number else cur + number)
                     }
                 }
             },
             onEraseClick = {
-                selectedCell?.let { (row, col) ->
-                    if (!hintCells[row][col]) {
-                        board[row][col] = null
-                        errorCells = errorCells - Pair(row, col)
+                selectedCell?.let { (r, c) ->
+                    if (!hintCells[r][c]) {
+                        board[r][c] = null
+                        errorCells = errorCells - Pair(r, c)
+                        saveBoard()
                     }
                 }
             }
@@ -176,22 +478,14 @@ fun SudokuScreen() {
 
         Button(
             onClick = {
-                val newErrors = mutableSetOf<Pair<Int, Int>>()
-                var allFilled = true
-                for (row in 0 until 9) {
-                    for (col in 0 until 9) {
-                        if (!hintCells[row][col]) {
-                            val value = board[row][col]
-                            when {
-                                value == null -> allFilled = false
-                                value != solution[row][col] -> newErrors.add(Pair(row, col))
-                            }
-                        }
+                when (check()) {
+                    CheckResult.HAS_EMPTY -> scope.launch {
+                        snackbarHostState.showSnackbar("まだ空白があります")
                     }
-                }
-                errorCells = newErrors
-                if (newErrors.isEmpty() && allFilled) {
-                    showClearDialog = true
+                    CheckResult.HAS_ERROR -> scope.launch {
+                        snackbarHostState.showSnackbar("間違っている箇所があります")
+                    }
+                    CheckResult.CLEAR -> showClearDialog = true
                 }
             },
             colors = ButtonDefaults.buttonColors(
@@ -203,8 +497,10 @@ fun SudokuScreen() {
             Text("チェック", fontSize = 16.sp)
         }
     }
+    } // Scaffold
 }
 
+// ---- Board & Cell ----
 @Composable
 fun SudokuBoard(
     board: List<List<Int?>>,
@@ -220,13 +516,13 @@ fun SudokuBoard(
             .aspectRatio(1f)
             .border(3.dp, Color.Black, RectangleShape)
     ) {
-        for (row in 0 until 9) {
+        for (row in 0..8) {
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
             ) {
-                for (col in 0 until 9) {
+                for (col in 0..8) {
                     SudokuCell(
                         value = board[row][col],
                         isHint = hintCells[row][col],
@@ -236,7 +532,6 @@ fun SudokuBoard(
                         onClick = { onCellClick(row, col) },
                         modifier = Modifier.weight(1f)
                     )
-
                     if (col == 2 || col == 5) {
                         Spacer(
                             modifier = Modifier
@@ -247,7 +542,6 @@ fun SudokuBoard(
                     }
                 }
             }
-
             if (row == 2 || row == 5) {
                 Spacer(
                     modifier = Modifier
@@ -270,17 +564,14 @@ fun SudokuCell(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val backgroundColor = if (isSelected) Color(0xFFBBDEFB) else Color.Transparent
-
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(backgroundColor)
+            .background(if (isSelected) Color(0xFFBBDEFB) else Color.Transparent)
             .border(0.5.dp, Color.Gray)
             .clickable { onClick() }
     ) {
         if (value != null) {
-            // 本番の数字を中央に表示
             Text(
                 text = value.toString(),
                 fontSize = 18.sp,
@@ -293,7 +584,6 @@ fun SudokuCell(
                 modifier = Modifier.align(Alignment.Center)
             )
         } else if (memos.isNotEmpty()) {
-            // メモ数字を3×3ミニグリッドで表示（オレンジ色）
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -321,6 +611,7 @@ fun SudokuCell(
     }
 }
 
+// ---- Number Pad ----
 @Composable
 fun NumberPad(
     onNumberClick: (Int) -> Unit,
@@ -328,7 +619,6 @@ fun NumberPad(
     onEraseClick: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        // 上段：通常入力（青色）
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -343,9 +633,7 @@ fun NumberPad(
                         containerColor = Color(0xFF1976D2),
                         contentColor = Color.White
                     )
-                ) {
-                    Text(text = n.toString(), fontSize = 16.sp)
-                }
+                ) { Text(n.toString(), fontSize = 16.sp) }
             }
             Button(
                 onClick = onEraseClick,
@@ -356,12 +644,9 @@ fun NumberPad(
                     containerColor = Color(0xFF1976D2),
                     contentColor = Color.White
                 )
-            ) {
-                Text(text = "消", fontSize = 16.sp)
-            }
+            ) { Text("消", fontSize = 16.sp) }
         }
 
-        // 下段：メモ入力（オレンジ色）
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -376,19 +661,9 @@ fun NumberPad(
                         containerColor = Color(0xFFE65100),
                         contentColor = Color.White
                     )
-                ) {
-                    Text(text = n.toString(), fontSize = 16.sp)
-                }
+                ) { Text(n.toString(), fontSize = 16.sp) }
             }
             Spacer(modifier = Modifier.weight(1f))
         }
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-fun SudokuPreview() {
-    MaterialTheme {
-        SudokuScreen()
     }
 }
