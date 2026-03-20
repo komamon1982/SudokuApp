@@ -1,4 +1,4 @@
-package com.test.myapplication
+package com.komamon.sudoku
 
 import org.junit.Test
 

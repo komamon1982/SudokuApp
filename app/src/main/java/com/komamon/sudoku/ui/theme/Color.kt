@@ -1,4 +1,4 @@
-package com.test.myapplication.ui.theme
+package com.komamon.sudoku.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
