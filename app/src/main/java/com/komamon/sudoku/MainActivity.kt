@@ -459,7 +459,7 @@ fun GameScreen(
                     if (!hintCells[r][c] && board[r][c] == null) {
                         val key = Pair(r, c)
                         val cur = memos.getOrDefault(key, emptySet())
-                        memos = memos + (key to if (number in cur) cur - number else cur + number)
+                        memos = memos + (key to if (number in cur) cur - number else if (cur.size < 4) cur + number else cur)
                     }
                 }
             },
@@ -469,6 +469,13 @@ fun GameScreen(
                         board[r][c] = null
                         errorCells = errorCells - Pair(r, c)
                         saveBoard()
+                    }
+                }
+            },
+            onMemoEraseClick = {
+                selectedCell?.let { (r, c) ->
+                    if (!hintCells[r][c]) {
+                        memos = memos - Pair(r, c)
                     }
                 }
             }
@@ -496,6 +503,19 @@ fun GameScreen(
         ) {
             Text("チェック", fontSize = 16.sp)
         }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "青文字：入力する数字　　オレンジ文字：仮置きする数字",
+            fontSize = 14.sp,
+            color = Color.Gray
+        )
+        Text(
+            text = "マスをタップしてから数字を入力してください",
+            fontSize = 14.sp,
+            color = Color.Gray
+        )
     }
     } // Scaffold
 }
@@ -584,24 +604,25 @@ fun SudokuCell(
                 modifier = Modifier.align(Alignment.Center)
             )
         } else if (memos.isNotEmpty()) {
+            val sorted = memos.sorted().toList()
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(1.dp),
+                    .padding(2.dp),
                 verticalArrangement = Arrangement.SpaceEvenly
             ) {
-                for (memoRow in 0..2) {
+                for (memoRow in 0..1) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly
                     ) {
-                        for (memoCol in 0..2) {
-                            val num = memoRow * 3 + memoCol + 1
+                        for (memoCol in 0..1) {
+                            val idx = memoRow * 2 + memoCol
                             Text(
-                                text = if (num in memos) num.toString() else " ",
-                                fontSize = 7.sp,
+                                text = if (idx < sorted.size) sorted[idx].toString() else "",
+                                fontSize = 12.sp,
                                 color = Color(0xFFE65100),
-                                lineHeight = 8.sp
+                                lineHeight = 13.sp
                             )
                         }
                     }
@@ -616,7 +637,8 @@ fun SudokuCell(
 fun NumberPad(
     onNumberClick: (Int) -> Unit,
     onMemoClick: (Int) -> Unit,
-    onEraseClick: () -> Unit
+    onEraseClick: () -> Unit,
+    onMemoEraseClick: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
@@ -663,7 +685,16 @@ fun NumberPad(
                     )
                 ) { Text(n.toString(), fontSize = 16.sp) }
             }
-            Spacer(modifier = Modifier.weight(1f))
+            Button(
+                onClick = onMemoEraseClick,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = PaddingValues(0.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFE65100),
+                    contentColor = Color.White
+                )
+            ) { Text("消", fontSize = 16.sp) }
         }
     }
 }
