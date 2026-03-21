@@ -483,25 +483,39 @@ fun GameScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        Button(
-            onClick = {
-                when (check()) {
-                    CheckResult.HAS_EMPTY -> scope.launch {
-                        snackbarHostState.showSnackbar("まだ空白があります")
-                    }
-                    CheckResult.HAS_ERROR -> scope.launch {
-                        snackbarHostState.showSnackbar("間違っている箇所があります")
-                    }
-                    CheckResult.CLEAR -> showClearDialog = true
-                }
-            },
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF388E3C),
-                contentColor = Color.White
-            ),
-            shape = RoundedCornerShape(8.dp)
+        val emptyCount = (0..8).sumOf { r -> (0..8).count { c -> board[r][c] == null } }
+
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center
         ) {
-            Text("チェック", fontSize = 16.sp)
+            Button(
+                onClick = {
+                    when (check()) {
+                        CheckResult.HAS_EMPTY -> scope.launch {
+                            snackbarHostState.showSnackbar("まだ空白があります")
+                        }
+                        CheckResult.HAS_ERROR -> scope.launch {
+                            snackbarHostState.showSnackbar("間違っている箇所があります")
+                        }
+                        CheckResult.CLEAR -> showClearDialog = true
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF388E3C),
+                    contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("チェック", fontSize = 16.sp)
+            }
+            Text(
+                text = "残り${emptyCount}マス",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (emptyCount == 0) Color(0xFF388E3C) else Color.Black,
+                modifier = Modifier.align(Alignment.CenterEnd)
+            )
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -530,6 +544,8 @@ fun SudokuBoard(
     memos: Map<Pair<Int, Int>, Set<Int>>,
     onCellClick: (Int, Int) -> Unit
 ) {
+    val selectedValue = selectedCell?.let { (r, c) -> board[r][c] }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -543,11 +559,20 @@ fun SudokuBoard(
                     .fillMaxWidth()
             ) {
                 for (col in 0..8) {
+                    val isSameGroup = selectedCell != null && selectedCell != Pair(row, col) &&
+                        (selectedCell.first == row ||
+                         selectedCell.second == col ||
+                         (row / 3 == selectedCell.first / 3 && col / 3 == selectedCell.second / 3))
+                    val isSameNumber = selectedCell != null && selectedCell != Pair(row, col) &&
+                        selectedValue != null && board[row][col] == selectedValue
+
                     SudokuCell(
                         value = board[row][col],
                         isHint = hintCells[row][col],
                         isSelected = selectedCell == Pair(row, col),
                         isError = Pair(row, col) in errorCells,
+                        isSameGroup = isSameGroup,
+                        isSameNumber = isSameNumber,
                         memos = memos[Pair(row, col)] ?: emptySet(),
                         onClick = { onCellClick(row, col) },
                         modifier = Modifier.weight(1f)
@@ -580,14 +605,22 @@ fun SudokuCell(
     isHint: Boolean,
     isSelected: Boolean,
     isError: Boolean,
+    isSameGroup: Boolean,
+    isSameNumber: Boolean,
     memos: Set<Int>,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val bgColor = when {
+        isSelected    -> Color(0xFF90CAF9)  // 選択中：薄い青
+        isSameNumber  -> Color(0xFFBBDEFB)  // 同じ数字：中くらいの青
+        isSameGroup   -> Color(0xFFF5F5F5)  // 同じ行・列・ブロック：グレー
+        else          -> Color.White
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(if (isSelected) Color(0xFFBBDEFB) else Color.Transparent)
+            .background(bgColor)
             .border(0.5.dp, Color.Gray)
             .clickable { onClick() }
     ) {
@@ -595,9 +628,10 @@ fun SudokuCell(
             Text(
                 text = value.toString(),
                 fontSize = 18.sp,
-                fontWeight = if (isHint) FontWeight.Bold else FontWeight.Normal,
+                fontWeight = if (isHint || isSelected) FontWeight.Bold else FontWeight.Normal,
                 color = when {
                     isError -> Color(0xFFD32F2F)
+                    isSelected && !isHint -> Color.White
                     isHint -> Color.Black
                     else -> Color(0xFF1565C0)
                 },
