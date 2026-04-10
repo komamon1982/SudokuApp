@@ -102,6 +102,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.zIndex
+import kotlin.random.Random
 
 // ---- ナビゲーション定義 ----
 
@@ -339,6 +352,24 @@ fun ProblemListScreen(
     }
 }
 
+// ---- 紙吹雪 ----
+
+/**
+ * 紙吹雪の1パーティクルを表すデータクラス。
+ * 全値は画面サイズ非依存の正規化座標・比率で保持し、Canvas描画時にpx変換する。
+ */
+private data class ConfettiParticle(
+    val x: Float,              // 横位置 0..1（画面幅に対する割合）
+    val phase: Float,          // 縦位置の初期オフセット 0..1（ループ用）
+    val speed: Float,          // 落下速度倍率
+    val width: Float,          // 短冊の幅（px）
+    val height: Float,         // 短冊の高さ（px）
+    val color: Color,
+    val rotationOffset: Float, // 初期回転角（度）
+    val rotationSpeed: Float,  // 1サイクルあたりの回転量（度）
+    val isRect: Boolean        // true=短冊形、false=円形
+)
+
 // ---- ゲーム画面 ----
 
 /**
@@ -411,16 +442,41 @@ fun GameScreen(
         }
     }
 
-    if (showClearDialog) {
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("クリア！") },
-            text = { Text("おめでとうございます！") },
-            confirmButton = {
-                TextButton(onClick = { onCleared(problem.id) }) { Text("OK") }
-            }
+    // 紙吹雪アニメーション用の状態（showClearDialog が true のときのみ実行される）
+    val confettiColors = remember {
+        listOf(
+            Color(0xFFE53935), Color(0xFF8E24AA), Color(0xFF1E88E5),
+            Color(0xFF00897B), Color(0xFFFFB300), Color(0xFF43A047),
+            Color(0xFFFF7043), Color(0xFF00ACC1), Color(0xFFEC407A),
+            Color(0xFF7CB342)
         )
     }
+    // 起動時に1度だけ生成し、リコンポーズで再生成しないよう remember で保持
+    val particles = remember {
+        List(280) { i ->
+            ConfettiParticle(
+                x              = Random.nextFloat(),
+                phase          = Random.nextFloat(),
+                speed          = 0.6f + Random.nextFloat() * 0.8f,
+                width          = 16f  + Random.nextFloat() * 24f,
+                height         = 8f   + Random.nextFloat() * 12f,
+                color          = confettiColors[i % confettiColors.size],
+                rotationOffset = Random.nextFloat() * 360f,
+                rotationSpeed  = -200f + Random.nextFloat() * 400f,
+                isRect         = Random.nextFloat() > 0.3f
+            )
+        }
+    }
+    // 0→1 を繰り返す時間軸（12秒サイクル）
+    val infiniteTransition = rememberInfiniteTransition(label = "confetti")
+    val time by infiniteTransition.animateFloat(
+        initialValue  = 0f,
+        targetValue   = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 12_000, easing = LinearEasing)
+        ),
+        label = "confetti_time"
+    )
 
     if (showEraseAllDialog) {
         AlertDialog(
@@ -441,7 +497,9 @@ fun GameScreen(
         )
     }
 
-    Scaffold(
+    // Scaffold と紙吹雪オーバーレイを同一 Box に置き、zIndex で重ね順を制御する
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         modifier = Modifier
             .fillMaxSize()
@@ -580,4 +638,87 @@ fun GameScreen(
             )
         }
     }
+
+        // 紙吹雪オーバーレイ（Scaffold より後に emit → zIndex で前面確定）
+        if (showClearDialog) {
+            // 半透明オーバーレイ＋紙吹雪 Canvas（zIndex = 10 で Scaffold より前面）
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x99000000))
+                    .zIndex(10f)
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    particles.forEach { p ->
+                        val screenX = p.x * size.width
+                        // (phase + time*speed) % 1f で各パーティクルが独立してループ落下
+                        val yFraction = ((p.phase + time * p.speed) % 1f)
+                        val screenY   = yFraction * size.height * 1.1f - size.height * 0.05f
+                        val angle     = (p.rotationOffset + time * p.rotationSpeed) % 360f
+                        withTransform({
+                            translate(screenX, screenY)
+                            rotate(degrees = angle)
+                        }) {
+                            if (p.isRect) {
+                                drawRect(
+                                    color   = p.color,
+                                    topLeft = Offset(-p.width / 2f, -p.height / 2f),
+                                    size    = Size(p.width, p.height)
+                                )
+                            } else {
+                                drawCircle(
+                                    color  = p.color,
+                                    radius = p.height / 2f
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ダイアログカード（紙吹雪より手前 zIndex = 11）
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(11f),
+                contentAlignment = Alignment.Center
+            ) {
+                Card(
+                    modifier  = Modifier
+                        .padding(horizontal = 40.dp)
+                        .fillMaxWidth(),
+                    shape     = RoundedCornerShape(16.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                    colors    = CardDefaults.cardColors(containerColor = Color.White)
+                ) {
+                    Column(
+                        modifier            = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text       = "クリア！",
+                            fontSize   = 28.sp,
+                            fontWeight = FontWeight.Bold,
+                            color      = Color(0xFF1976D2)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = "おめでとうございます！", fontSize = 16.sp)
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Button(
+                            onClick = { onCleared(problem.id) },
+                            colors  = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFF1976D2),
+                                contentColor   = Color.White
+                            ),
+                            shape   = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("OK", fontSize = 16.sp)
+                        }
+                    }
+                }
+            }
+        }
+    } // outer Box
 }
