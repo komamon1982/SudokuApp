@@ -408,6 +408,8 @@ fun GameScreen(
     var errorCells by remember { mutableStateOf(emptySet<Pair<Int, Int>>()) }
     var showClearDialog by remember { mutableStateOf(false) }
     var showEraseAllDialog by remember { mutableStateOf(false) }
+    // ヒントボタンの連続押しカウンター（5回連続で強制ヒント）
+    var hintPressCount by remember { mutableStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -442,7 +444,149 @@ fun GameScreen(
         }
     }
 
-    // 紙吹雪アニメーション用の状態（showClearDialog が true のときのみ実行される）
+    // ---- ヒントロジック ----
+
+    /**
+     * ネイキッドシングル検出：あるマスに入れられる数字が1つだけの場合を検出する。
+     * 同じ行・列・3×3ブロックに既に入っている数字を除外し、残り1つなら確定。
+     */
+    fun findNakedSingles(): List<Triple<Int, Int, Int>> {
+        val results = mutableListOf<Triple<Int, Int, Int>>()
+        for (r in 0..8) {
+            for (c in 0..8) {
+                if (board[r][c] != null) continue // 既に入力済みはスキップ
+                val used = mutableSetOf<Int>()
+                // 同じ行の数字を収集
+                for (cc in 0..8) board[r][cc]?.let { used.add(it) }
+                // 同じ列の数字を収集
+                for (rr in 0..8) board[rr][c]?.let { used.add(it) }
+                // 同じ3×3ブロックの数字を収集
+                val br = (r / 3) * 3
+                val bc = (c / 3) * 3
+                for (rr in br..br+2) for (cc in bc..bc+2) board[rr][cc]?.let { used.add(it) }
+                // 使われていない数字を候補とする
+                val candidates = (1..9).filter { it !in used }
+                if (candidates.size == 1) {
+                    results.add(Triple(r, c, candidates[0]))
+                }
+            }
+        }
+        return results
+    }
+
+    /**
+     * ヒドゥンシングル検出：ある行・列・ブロックで特定の数字が入れられるマスが1つだけの場合を検出。
+     */
+    fun findHiddenSingles(): List<Triple<Int, Int, Int>> {
+        val results = mutableListOf<Triple<Int, Int, Int>>()
+
+        // 行方向のヒドゥンシングルチェック
+        for (r in 0..8) {
+            for (num in 1..9) {
+                val positions = (0..8).filter { c ->
+                    board[r][c] == null && run {
+                        val used = mutableSetOf<Int>()
+                        for (cc in 0..8) board[r][cc]?.let { used.add(it) }
+                        for (rr in 0..8) board[rr][c]?.let { used.add(it) }
+                        val br = (r / 3) * 3; val bc = (c / 3) * 3
+                        for (rr in br..br+2) for (cc in bc..bc+2) board[rr][cc]?.let { used.add(it) }
+                        num !in used
+                    }
+                }
+                if (positions.size == 1) results.add(Triple(r, positions[0], num))
+            }
+        }
+
+        // 列方向のヒドゥンシングルチェック
+        for (c in 0..8) {
+            for (num in 1..9) {
+                val positions = (0..8).filter { r ->
+                    board[r][c] == null && run {
+                        val used = mutableSetOf<Int>()
+                        for (cc in 0..8) board[r][cc]?.let { used.add(it) }
+                        for (rr in 0..8) board[rr][c]?.let { used.add(it) }
+                        val br = (r / 3) * 3; val bc = (c / 3) * 3
+                        for (rr in br..br+2) for (cc in bc..bc+2) board[rr][cc]?.let { used.add(it) }
+                        num !in used
+                    }
+                }
+                if (positions.size == 1) results.add(Triple(positions[0], c, num))
+            }
+        }
+
+        // 3×3ブロック方向のヒドゥンシングルチェック
+        for (blockR in 0..2) {
+            for (blockC in 0..2) {
+                val br = blockR * 3; val bc = blockC * 3
+                for (num in 1..9) {
+                    val positions = mutableListOf<Pair<Int, Int>>()
+                    for (r in br..br+2) {
+                        for (c in bc..bc+2) {
+                            if (board[r][c] == null) {
+                                val used = mutableSetOf<Int>()
+                                for (cc in 0..8) board[r][cc]?.let { used.add(it) }
+                                for (rr in 0..8) board[rr][c]?.let { used.add(it) }
+                                for (rr in br..br+2) for (cc in bc..bc+2) board[rr][cc]?.let { used.add(it) }
+                                if (num !in used) positions.add(Pair(r, c))
+                            }
+                        }
+                    }
+                    if (positions.size == 1) results.add(Triple(positions[0].first, positions[0].second, num))
+                }
+            }
+        }
+
+        // 重複除去して返す
+        return results.distinctBy { Pair(it.first, it.second) }
+    }
+
+    /**
+     * ヒントボタン押下時の処理。
+     * - 確実に置けるマス（ネイキッド＋ヒドゥンシングル）がある場合：
+     *   「まだ置ける箇所があるよ」と表示（5回連続押しなら強制入力）
+     * - 確実に置けるマスがない場合：正解を1マスランダム入力
+     */
+    fun onHintClick() {
+        // 確実に置けるマスを検出
+        val solvable = (findNakedSingles() + findHiddenSingles())
+            .distinctBy { Pair(it.first, it.second) }
+
+        if (solvable.isNotEmpty() && hintPressCount < 2) {
+            // まだ解けるマスがある → メッセージ表示してカウントアップ
+            hintPressCount++
+            scope.launch {
+                snackbarHostState.showSnackbar("まだ置ける箇所があるよ")
+            }
+        } else {
+            // 強制ヒント：ランダムに1マス正解を入力
+            hintPressCount = 0
+            // 候補があればそこから、なければ空きマス全体から正解を探す
+            val candidates = if (solvable.isNotEmpty()) {
+                solvable
+            } else {
+                // 空きマス全体から候補を作成
+                (0..8).flatMap { r ->
+                    (0..8).mapNotNull { c ->
+                        if (board[r][c] == null) Triple(r, c, problem.answer[r][c] ?: 0) else null
+                    }
+                }.filter { it.third != 0 }
+            }
+            if (candidates.isEmpty()) return // 空きマスなし（すでに全部入力済み）
+
+            val chosen = candidates.random()
+            board[chosen.first][chosen.second] = chosen.third
+            memos = memos - Pair(chosen.first, chosen.second)
+            errorCells = errorCells - Pair(chosen.first, chosen.second)
+            selectedCell = Pair(chosen.first, chosen.second)
+            saveBoard()
+
+            scope.launch {
+                snackbarHostState.showSnackbar("ヒント：(${chosen.first + 1}行, ${chosen.second + 1}列)に${chosen.third}を入れました")
+            }
+        }
+    }
+
+
     val confettiColors = remember {
         listOf(
             Color(0xFFE53935), Color(0xFF8E24AA), Color(0xFF1E88E5),
@@ -500,144 +644,161 @@ fun GameScreen(
     // Scaffold と紙吹雪オーバーレイを同一 Box に置き、zIndex で重ね順を制御する
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.systemBars)
-    ) { innerPadding ->
-        Column(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Row(
+                .windowInsetsPadding(WindowInsets.systemBars)
+        ) { innerPadding ->
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                TextButton(onClick = {
-                    saveBoard()
-                    onBack()
-                }) {
-                    Text("← 戻る", fontSize = 16.sp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = {
+                        saveBoard()
+                        onBack()
+                    }) {
+                        Text("← 戻る", fontSize = 16.sp)
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        text = "${problem.difficulty}　${index + 1}/${total}",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    TextButton(onClick = { showEraseAllDialog = true }) {
+                        Text("全消去", fontSize = 16.sp, color = Color(0xFFD32F2F))
+                    }
                 }
-                Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    text = "${problem.difficulty}　${index + 1}/${total}",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
+
+                SudokuBoard(
+                    board = board,
+                    hintCells = hintCells,
+                    selectedCell = selectedCell,
+                    errorCells = errorCells,
+                    memos = memos,
+                    onCellClick = { r, c ->
+                        hintPressCount = 0
+                        selectedCell = if (selectedCell == Pair(r, c)) null else Pair(r, c)
+                    }
                 )
-                Spacer(modifier = Modifier.weight(1f))
-                TextButton(onClick = { showEraseAllDialog = true }) {
-                    Text("全消去", fontSize = 16.sp, color = Color(0xFFD32F2F))
-                }
-            }
 
-            SudokuBoard(
-                board = board,
-                hintCells = hintCells,
-                selectedCell = selectedCell,
-                errorCells = errorCells,
-                memos = memos,
-                onCellClick = { r, c ->
-                    selectedCell = if (selectedCell == Pair(r, c)) null else Pair(r, c)
-                }
-            )
+                Spacer(modifier = Modifier.height(16.dp))
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            NumberPad(
-                onNumberClick = { number ->
-                    selectedCell?.let { (r, c) ->
-                        if (!hintCells[r][c]) {
-                            board[r][c] = number
-                            memos = memos - Pair(r, c)
-                            errorCells = errorCells - Pair(r, c)
-                            saveBoard()
-                        }
-                    }
-                },
-                onMemoClick = { number ->
-                    selectedCell?.let { (r, c) ->
-                        if (!hintCells[r][c] && board[r][c] == null) {
-                            val key = Pair(r, c)
-                            val cur = memos.getOrDefault(key, emptySet())
-                            memos = memos + (key to if (number in cur) cur - number else if (cur.size < 4) cur + number else cur)
-                        }
-                    }
-                },
-                onEraseClick = {
-                    selectedCell?.let { (r, c) ->
-                        if (!hintCells[r][c]) {
-                            board[r][c] = null
-                            errorCells = errorCells - Pair(r, c)
-                            saveBoard()
-                        }
-                    }
-                },
-                onMemoEraseClick = {
-                    selectedCell?.let { (r, c) ->
-                        if (!hintCells[r][c]) {
-                            memos = memos - Pair(r, c)
-                        }
-                    }
-                }
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            val emptyCount = (0..8).sumOf { r -> (0..8).count { c -> board[r][c] == null } }
-
-            Box(
-                modifier = Modifier.fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) {
-                Button(
-                    onClick = {
-                        when (check()) {
-                            CheckResult.HAS_EMPTY -> scope.launch {
-                                snackbarHostState.showSnackbar("まだ空白があります")
+                NumberPad(
+                    onNumberClick = { number ->
+                        hintPressCount = 0
+                        selectedCell?.let { (r, c) ->
+                            if (!hintCells[r][c]) {
+                                board[r][c] = number
+                                memos = memos - Pair(r, c)
+                                errorCells = errorCells - Pair(r, c)
+                                saveBoard()
                             }
-                            CheckResult.HAS_ERROR -> scope.launch {
-                                snackbarHostState.showSnackbar("間違っている箇所があります")
-                            }
-                            CheckResult.CLEAR -> showClearDialog = true
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF388E3C),
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(8.dp)
+                    onMemoClick = { number ->
+                        hintPressCount = 0
+                        selectedCell?.let { (r, c) ->
+                            if (!hintCells[r][c] && board[r][c] == null) {
+                                val key = Pair(r, c)
+                                val cur = memos.getOrDefault(key, emptySet())
+                                memos = memos + (key to if (number in cur) cur - number else if (cur.size < 4) cur + number else cur)
+                            }
+                        }
+                    },
+                    onEraseClick = {
+                        hintPressCount = 0
+                        selectedCell?.let { (r, c) ->
+                            if (!hintCells[r][c]) {
+                                board[r][c] = null
+                                errorCells = errorCells - Pair(r, c)
+                                saveBoard()
+                            }
+                        }
+                    },
+                    onMemoEraseClick = {
+                        hintPressCount = 0
+                        selectedCell?.let { (r, c) ->
+                            if (!hintCells[r][c]) {
+                                memos = memos - Pair(r, c)
+                            }
+                        }
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                val emptyCount = (0..8).sumOf { r -> (0..8).count { c -> board[r][c] == null } }
+
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text("チェック", fontSize = 16.sp)
+                    Button(
+                        onClick = { onHintClick() },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFF57C00),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.align(Alignment.CenterStart)
+                    ) {
+                        Text("ヒント", fontSize = 16.sp)
+                    }
+                    Button(
+                        onClick = {
+                            hintPressCount = 0
+                            when (check()) {
+                                CheckResult.HAS_EMPTY -> scope.launch {
+                                    snackbarHostState.showSnackbar("まだ空白があります")
+                                }
+                                CheckResult.HAS_ERROR -> scope.launch {
+                                    snackbarHostState.showSnackbar("間違っている箇所があります")
+                                }
+                                CheckResult.CLEAR -> showClearDialog = true
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF388E3C),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("チェック", fontSize = 16.sp)
+                    }
+                    Text(
+                        text = "残り${emptyCount}マス",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (emptyCount == 0) Color(0xFF388E3C) else Color.Black,
+                        modifier = Modifier.align(Alignment.CenterEnd)
+                    )
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
                 Text(
-                    text = "残り${emptyCount}マス",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (emptyCount == 0) Color(0xFF388E3C) else Color.Black,
-                    modifier = Modifier.align(Alignment.CenterEnd)
+                    text = "青文字：入力する数字　　オレンジ文字：仮置きする数字",
+                    fontSize = 14.sp,
+                    color = Color.Gray
+                )
+                Text(
+                    text = "マスをタップしてから数字を入力してください",
+                    fontSize = 14.sp,
+                    color = Color.Gray
                 )
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "青文字：入力する数字　　オレンジ文字：仮置きする数字",
-                fontSize = 14.sp,
-                color = Color.Gray
-            )
-            Text(
-                text = "マスをタップしてから数字を入力してください",
-                fontSize = 14.sp,
-                color = Color.Gray
-            )
         }
-    }
 
         // 紙吹雪オーバーレイ（Scaffold より後に emit → zIndex で前面確定）
         if (showClearDialog) {
