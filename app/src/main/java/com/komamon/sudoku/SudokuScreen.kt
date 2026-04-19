@@ -114,6 +114,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -365,6 +366,35 @@ fun ProblemListScreen(
 ) {
     var showResetDialog by remember { mutableStateOf(false) }
 
+    // ヘッダーのフェードイン＋スライドイン (600ms)
+    val headerAlpha = remember { Animatable(0f) }
+    val headerOffsetY = remember { Animatable(-40f) }
+    LaunchedEffect(Unit) {
+        launch { headerAlpha.animateTo(1f, animationSpec = tween(600)) }
+        launch { headerOffsetY.animateTo(0f, animationSpec = tween(600)) }
+    }
+
+    // 落下する数字の背景パーティクル
+    val bgParticles = remember {
+        List(30) {
+            NumberParticle(
+                x = Random.nextFloat(),
+                phase = Random.nextFloat(),
+                speed = 0.3f + Random.nextFloat() * 0.4f,
+                sizeSp = 24f + Random.nextFloat() * 16f,
+                digit = ('1'..'9').random().toString(),
+                alpha = 0.05f + Random.nextFloat() * 0.02f
+            )
+        }
+    }
+    val bgTransition = rememberInfiniteTransition(label = "bg_fall_list")
+    val fallTime by bgTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(12_000, easing = LinearEasing)),
+        label = "fall_time_list"
+    )
+
     if (showResetDialog) {
         AlertDialog(
             onDismissRequest = { showResetDialog = false },
@@ -381,71 +411,117 @@ fun ProblemListScreen(
         )
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFFF5F0E8), Color(0xFFE8DCC8))))
             .windowInsetsPadding(WindowInsets.systemBars)
-            .padding(16.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = onBack) {
-                Text("← 戻る", fontSize = 16.sp)
+        // 落下する数字の背景
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            drawIntoCanvas { canvas ->
+                bgParticles.forEach { p ->
+                    val paint = android.graphics.Paint().apply {
+                        color = android.graphics.Color.rgb(26, 26, 46)
+                        alpha = (255 * p.alpha).toInt()
+                        textSize = p.sizeSp.sp.toPx()
+                        isAntiAlias = true
+                    }
+                    val yFraction = ((p.phase + fallTime * p.speed) % 1f)
+                    canvas.nativeCanvas.drawText(
+                        p.digit,
+                        p.x * size.width,
+                        yFraction * (size.height + 80f) - 40f,
+                        paint
+                    )
+                }
             }
-            Text(
-                text = difficulty,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 8.dp)
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            Text(
-                text = "${clearedIds.count { id -> problems.any { it.id == id } }}/${problems.size} クリア",
-                fontSize = 14.sp,
-                color = Color(0xFF388E3C)
-            )
         }
-        TextButton(
-            onClick = { showResetDialog = true },
-            modifier = Modifier.align(Alignment.End)
-        ) {
-            Text("クリア状態をリセット", fontSize = 13.sp, color = Color(0xFFD32F2F))
-        }
-        Spacer(modifier = Modifier.height(4.dp))
 
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(4),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
         ) {
-            itemsIndexed(problems) { index, problem ->
-                val isCleared = problem.id in clearedIds
-                Box(
+            // アニメーション付きヘッダー
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .alpha(headerAlpha.value)
+                    .offset(y = headerOffsetY.value.dp)
+            ) {
+                Row(
                     modifier = Modifier
-                        .aspectRatio(1f)
-                        .background(
-                            color = if (isCleared) Color(0xFF388E3C) else Color(0xFF1976D2),
-                            shape = RoundedCornerShape(8.dp)
-                        )
-                        .clickable { onProblemSelected(problem, index) },
-                    contentAlignment = Alignment.Center
+                        .fillMaxWidth()
+                        .padding(bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (isCleared) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("✓", fontSize = 18.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                            Text("${index + 1}", fontSize = 11.sp, color = Color.White)
+                    TextButton(onClick = onBack) {
+                        Text("← 戻る", fontSize = 16.sp, color = Color(0xFF1A1A2E))
+                    }
+                    Text(
+                        text = difficulty,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF1A1A2E),
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                    Spacer(modifier = Modifier.weight(1f))
+                    Text(
+                        text = "${clearedIds.count { id -> problems.any { it.id == id } }}/${problems.size} クリア",
+                        fontSize = 14.sp,
+                        color = Color(0xFF388E3C)
+                    )
+                }
+                TextButton(
+                    onClick = { showResetDialog = true },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("クリア状態をリセット", fontSize = 13.sp, color = Color(0xFFD32F2F))
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+
+            // グリッド（各マスが順番にフェードイン）
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(4),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                itemsIndexed(problems) { index, problem ->
+                    val isCleared = problem.id in clearedIds
+                    val cellAlpha = remember { Animatable(0f) }
+                    val cellScale = remember { Animatable(0.8f) }
+                    LaunchedEffect(Unit) {
+                        delay(index * 30L)
+                        launch { cellAlpha.animateTo(1f, animationSpec = tween(300)) }
+                        launch { cellScale.animateTo(1f, animationSpec = tween(300)) }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .aspectRatio(1f)
+                            .alpha(cellAlpha.value)
+                            .scale(cellScale.value)
+                            .background(
+                                color = if (isCleared) Color(0xFF2E7D32) else Color(0xFF2C2C3E),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable { onProblemSelected(problem, index) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isCleared) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("✓", fontSize = 20.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                Text("${index + 1}", fontSize = 13.sp, color = Color.White)
+                            }
+                        } else {
+                            Text(
+                                text = "${index + 1}",
+                                fontSize = 20.sp,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
-                    } else {
-                        Text(
-                            text = "${index + 1}",
-                            fontSize = 18.sp,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
                     }
                 }
             }
