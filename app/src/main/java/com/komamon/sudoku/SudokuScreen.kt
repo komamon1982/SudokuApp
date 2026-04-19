@@ -102,19 +102,27 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.offset
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.zIndex
 import kotlin.random.Random
+import kotlinx.coroutines.delay
 
 // ---- ナビゲーション定義 ----
 
@@ -200,41 +208,134 @@ fun SudokuApp() {
 
 // ---- 難易度選択画面 ----
 
+private data class NumberParticle(
+    val x: Float,
+    val phase: Float,
+    val speed: Float,
+    val sizeSp: Float,
+    val digit: String,
+    val alpha: Float
+)
+
 /**
- * 難易度選択画面のComposable関数。
+ * 難易度選択画面のComposable関数。和風テイスト＋3種のアニメーション付き。
  *
  * @param onDifficultySelected 難易度が選ばれた時に呼ばれるコールバック。
  */
 @Composable
 fun DifficultySelectScreen(onDifficultySelected: (String) -> Unit) {
-    Column(
+    // 1. タイトルのフェードイン＋スライドイン (800ms)
+    val titleAlpha = remember { Animatable(0f) }
+    val titleOffsetY = remember { Animatable(-60f) }
+    LaunchedEffect(Unit) {
+        launch { titleAlpha.animateTo(1f, animationSpec = tween(800)) }
+        launch { titleOffsetY.animateTo(0f, animationSpec = tween(800)) }
+    }
+
+    // 2. ボタンの順番フェードイン (入門→初級→中級→上級、100msずつ遅延)
+    val buttonAlphas = remember { List(4) { Animatable(0f) } }
+    LaunchedEffect(Unit) {
+        (0..3).forEach { i ->
+            launch {
+                delay(400L + i * 100L)
+                buttonAlphas[i].animateTo(1f, animationSpec = tween(500))
+            }
+        }
+    }
+
+    // 3. 落下する数字の背景パーティクル
+    val bgParticles = remember {
+        List(30) {
+            NumberParticle(
+                x = Random.nextFloat(),
+                phase = Random.nextFloat(),
+                speed = 0.3f + Random.nextFloat() * 0.4f,
+                sizeSp = 24f + Random.nextFloat() * 16f,
+                digit = ('1'..'9').random().toString(),
+                alpha = 0.08f + Random.nextFloat() * 0.04f
+            )
+        }
+    }
+    val bgTransition = rememberInfiniteTransition(label = "bg_fall")
+    val fallTime by bgTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(12_000, easing = LinearEasing)),
+        label = "fall_time"
+    )
+
+    val difficultyItems = listOf("入門" to "○", "初級" to "◎", "中級" to "◆", "上級" to "★")
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(Color(0xFFF5F0E8), Color(0xFFE8DCC8))))
             .windowInsetsPadding(WindowInsets.systemBars)
-            .padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
     ) {
-        Text(
-            text = "数独",
-            fontSize = 40.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(bottom = 56.dp)
-        )
-        listOf("入門", "初級", "中級", "上級").forEach { difficulty ->
-            Button(
-                onClick = { onDifficultySelected(difficulty) },
+        // 落下する数字の背景
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            drawIntoCanvas { canvas ->
+                bgParticles.forEach { p ->
+                    val paint = android.graphics.Paint().apply {
+                        color = android.graphics.Color.rgb(26, 26, 46)
+                        alpha = (255 * p.alpha).toInt()
+                        textSize = p.sizeSp.sp.toPx()
+                        isAntiAlias = true
+                    }
+                    val yFraction = ((p.phase + fallTime * p.speed) % 1f)
+                    canvas.nativeCanvas.drawText(
+                        p.digit,
+                        p.x * size.width,
+                        yFraction * (size.height + 80f) - 40f,
+                        paint
+                    )
+                }
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            // アニメーション付きタイトル
+            Text(
+                text = "数独",
+                fontSize = 60.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF1A1A2E),
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-                    .height(56.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF1976D2),
-                    contentColor = Color.White
-                )
-            ) {
-                Text(difficulty, fontSize = 20.sp)
+                    .alpha(titleAlpha.value)
+                    .offset(y = titleOffsetY.value.dp)
+                    .padding(bottom = 56.dp)
+            )
+
+            // 難易度ボタン（順番フェードイン）
+            difficultyItems.forEachIndexed { index, (label, icon) ->
+                Button(
+                    onClick = { onDifficultySelected(label) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                        .height(56.dp)
+                        .alpha(buttonAlphas[index].value),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF2C2C3E),
+                        contentColor = Color.White
+                    )
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Start,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(icon, fontSize = 18.sp, modifier = Modifier.padding(end = 12.dp))
+                        Text(label, fontSize = 20.sp)
+                    }
+                }
             }
         }
     }
