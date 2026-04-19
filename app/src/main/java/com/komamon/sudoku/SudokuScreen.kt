@@ -503,21 +503,21 @@ fun ProblemListScreen(
                             .alpha(cellAlpha.value)
                             .scale(cellScale.value)
                             .background(
-                                color = if (isCleared) Color(0xFF2E7D32) else Color(0xFF2C2C3E),
-                                shape = RoundedCornerShape(12.dp)
+                                color = if (isCleared) Color(0xFF388E3C) else Color(0xFF1976D2),
+                                shape = RoundedCornerShape(8.dp)
                             )
                             .clickable { onProblemSelected(problem, index) },
                         contentAlignment = Alignment.Center
                     ) {
                         if (isCleared) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text("✓", fontSize = 20.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                                Text("${index + 1}", fontSize = 13.sp, color = Color.White)
+                                Text("✓", fontSize = 18.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                Text("${index + 1}", fontSize = 11.sp, color = Color.White)
                             }
                         } else {
                             Text(
                                 text = "${index + 1}",
-                                fontSize = 20.sp,
+                                fontSize = 18.sp,
                                 color = Color.White,
                                 fontWeight = FontWeight.Bold
                             )
